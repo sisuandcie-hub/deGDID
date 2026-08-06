@@ -990,3 +990,169 @@ Describe 'degdid Unblock sequencing' {
     Assert-MockCalled Invoke-DnsFlush 0 -Scope It
   }
 }
+
+Describe 'degdid firewall removal without dynamic-keyword cmdlets' {
+  # Windows 10 19045 and Windows 11 builds before 22H2 are supported targets
+  # but have no Get/New/Remove-NetFirewallDynamicKeywordAddress cmdlets, so
+  # Block never creates firewall state there. Unblock must still complete.
+
+  It 'succeeds when dynamic-keyword cmdlets are unavailable and no rules exist' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $false }
+    Mock Get-NetFirewallRule {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $false
+        Health = 'Unavailable'
+        KeywordCount = 0
+        Errors = @()
+      }
+    }
+
+    $result = Remove-FirewallBlock
+    $result.Success | Should Be $true
+    $result.KeywordCleanup | Should Be 'SkippedCmdletsUnavailable'
+    $result.Message | Should Match 'removed'
+  }
+
+  It 'reports DryRun success when dynamic-keyword cmdlets are unavailable' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $false }
+    Mock Get-FirewallState {
+      [pscustomobject]@{ Available = $false; Health = 'Unavailable' }
+    }
+
+    (Remove-FirewallBlock -DryRun).Success | Should Be $true
+  }
+
+  It 'fails closed when a managed rule survives removal' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $false }
+    Mock Get-NetFirewallRule {
+      [pscustomobject]@{ Name = 'degdid-block-fqdn-v2' }
+    }
+    Mock Remove-ManagedFirewallRules {}
+    Mock Remove-StagingMintServiceRule {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $false
+        Health = 'Unavailable'
+        KeywordCount = 0
+        Errors = @()
+      }
+    }
+
+    $result = Remove-FirewallBlock
+    $result.Success | Should Be $false
+    $result.Message | Should Match 'remains'
+  }
+
+  It 'fails closed when rule enumeration errors during verification' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $false }
+    Mock Get-NetFirewallRule { throw 'provider failed' }
+    Mock Remove-ManagedFirewallRules {}
+    Mock Remove-StagingMintServiceRule {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $false
+        Health = 'Unavailable'
+        KeywordCount = 0
+        Errors = @()
+      }
+    }
+
+    $result = Remove-FirewallBlock
+    $result.Success | Should Be $false
+    $result.Message | Should Match 'could not be enumerated'
+  }
+
+  It 'cleans keywords when dynamic-keyword cmdlets are available' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $true }
+    Mock Get-NetFirewallRule {}
+    Mock Remove-DegdidDynamicKeyword {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $true
+        Health = 'Absent'
+        KeywordCount = 0
+        Errors = @()
+      }
+    }
+
+    $result = Remove-FirewallBlock
+    $result.Success | Should Be $true
+    $result.KeywordCleanup | Should Be 'Removed'
+    Assert-MockCalled Remove-DegdidDynamicKeyword 11 -Scope It
+  }
+
+  It 'fails closed when keywords survive removal' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $true }
+    Mock Get-NetFirewallRule {}
+    Mock Remove-DegdidDynamicKeyword {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $true
+        Health = 'Malformed'
+        KeywordCount = 2
+        Errors = @()
+      }
+    }
+
+    $result = Remove-FirewallBlock
+    $result.Success | Should Be $false
+  }
+
+  It 'fails closed when keyword state cannot be enumerated' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $true }
+    Mock Get-NetFirewallRule {}
+    Mock Remove-DegdidDynamicKeyword {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $true
+        Health = 'Error'
+        KeywordCount = 0
+        Errors = @('Keywords: provider failed')
+      }
+    }
+
+    $result = Remove-FirewallBlock
+    $result.Success | Should Be $false
+  }
+
+  It 'unblocks hosts on a dynamic-keyword-less system end to end' {
+    Mock Get-Command { $true }
+    Mock Test-DynamicFirewallSupport { $false }
+    Mock Get-NetFirewallRule {}
+    Mock Get-FirewallState {
+      [pscustomobject]@{
+        Available = $false
+        Health = 'Unavailable'
+        KeywordCount = 0
+        Errors = @()
+      }
+    }
+    $script:unblockCalls = New-Object System.Collections.Generic.List[string]
+    Mock Invoke-HostsDocumentChange {
+      param($Mode, $DryRun)
+      [void]$script:unblockCalls.Add(
+        $(if ($DryRun) { 'hosts-preflight' } else { 'hosts-remove' })
+      )
+      [pscustomobject]@{ Mode = $Mode; DryRun = [bool]$DryRun }
+    }
+    Mock Invoke-DnsFlush {
+      [void]$script:unblockCalls.Add('dns-flush')
+    }
+    Mock Read-HostsDocument {
+      [pscustomobject]@{ State = [pscustomobject]@{ State = 'Absent' } }
+    }
+
+    $result = Invoke-UnblockConfiguration
+    $result.Success | Should Be $true
+    ($script:unblockCalls -join ',') |
+      Should Be 'hosts-preflight,hosts-remove,dns-flush'
+  }
+}

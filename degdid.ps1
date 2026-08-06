@@ -1398,12 +1398,33 @@ function Set-FirewallBlock {
   }
 }
 
+function Get-ManagedFirewallRuleRemainders {
+  # Enumerate with -ErrorAction Stop and filter client-side so a provider
+  # failure cannot be mistaken for "no rules remain". A bare -Name probe
+  # errors when nothing matches, which is indistinguishable from a real
+  # enumeration failure without inspecting error categories.
+  $managedNames = @(
+    $script:FirewallRuleName,
+    $script:MintServiceRuleName,
+    $script:StagingMintServiceRuleName
+  )
+  return @(
+    Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop |
+      Where-Object { $managedNames -contains $_.Name }
+  )
+}
+
 function Remove-FirewallBlock {
   param([switch]$DryRun)
 
+  $ruleCmdletsAvailable = (
+    [bool](Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) -and
+    [bool](Get-Command Remove-NetFirewallRule -ErrorAction SilentlyContinue)
+  )
+
   if ($DryRun) {
     return [pscustomobject]@{
-      Success = Test-DynamicFirewallSupport
+      Success = $ruleCmdletsAvailable
       DryRun = $true
       Message = 'Would remove current managed firewall rules and keywords.'
       State = Get-FirewallState
@@ -1411,20 +1432,23 @@ function Remove-FirewallBlock {
   }
 
   try {
-    if (
-      -not (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) -or
-      -not (Get-Command Remove-NetFirewallRule -ErrorAction SilentlyContinue)
-    ) {
+    if (-not $ruleCmdletsAvailable) {
       throw 'Firewall rule cmdlets are unavailable.'
     }
     Remove-ManagedFirewallRules
     Remove-StagingMintServiceRule
 
-    if (-not (Test-DynamicFirewallSupport)) {
-      throw 'Dynamic-keyword cmdlets are unavailable; keyword cleanup cannot verify.'
-    }
-    foreach ($hostName in $script:BlockHosts) {
-      Remove-DegdidDynamicKeyword -HostName $hostName
+    # degdid can only have created dynamic-keyword state on systems where the
+    # dynamic-keyword cmdlets exist (Windows 11 22H2 and newer). On supported
+    # builds without them (Windows 10 19045, Windows 11 before 22H2) no
+    # keyword state can exist, so the missing cmdlets must not strand the
+    # Unblock recovery path.
+    $keywordCleanup = 'SkippedCmdletsUnavailable'
+    if (Test-DynamicFirewallSupport) {
+      foreach ($hostName in $script:BlockHosts) {
+        Remove-DegdidDynamicKeyword -HostName $hostName
+      }
+      $keywordCleanup = 'Removed'
     }
   } catch {
     return [pscustomobject]@{
@@ -1435,11 +1459,37 @@ function Remove-FirewallBlock {
     }
   }
 
+  # Verify rule removal with the universally available rule cmdlets rather
+  # than Get-FirewallState, whose Health is 'Unavailable' on systems without
+  # dynamic-keyword support even when no managed state remains. Enumeration
+  # failures are fail-closed: they are indistinguishable from leftover rules.
   $state = Get-FirewallState
+  try {
+    $remainingRules = @(Get-ManagedFirewallRuleRemainders)
+  } catch {
+    return [pscustomobject]@{
+      Success = $false
+      DryRun = $false
+      Message = 'Managed firewall rules could not be enumerated: {0}' -f
+        $_.Exception.Message
+      KeywordCleanup = $keywordCleanup
+      State = $state
+    }
+  }
+  $keywordsCleared = (
+    $keywordCleanup -eq 'SkippedCmdletsUnavailable' -or
+    ($state.KeywordCount -eq 0 -and $state.Errors.Count -eq 0)
+  )
+  $success = ($remainingRules.Count -eq 0 -and $keywordsCleared)
   return [pscustomobject]@{
-    Success = $state.Health -eq 'Absent'
+    Success = $success
     DryRun = $false
-    Message = 'Managed firewall rules and keywords removed.'
+    Message = $(if ($success) {
+      'Managed firewall rules and keywords removed.'
+    } else {
+      'Managed firewall state remains after cleanup.'
+    })
+    KeywordCleanup = $keywordCleanup
     State = $state
   }
 }

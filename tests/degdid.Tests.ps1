@@ -1156,3 +1156,66 @@ Describe 'degdid firewall removal without dynamic-keyword cmdlets' {
       Should Be 'hosts-preflight,hosts-remove,dns-flush'
   }
 }
+
+Describe 'degdid identity service snapshot' {
+  It 'maps running state and start type for present services' {
+    Mock Get-Service {
+      [pscustomobject]@{ Name = 'wlidsvc'; Status = 'Running'; StartType = 'Manual' }
+      [pscustomobject]@{ Name = 'CDPSvc';  Status = 'Stopped'; StartType = 'Automatic' }
+    }
+    $snap = Get-GdidServiceSnapshot
+    $snap.Success | Should Be $true
+    @($snap.Services).Count | Should Be 2
+    (@($snap.Services) | Where-Object { $_.Name -eq 'wlidsvc' }).WasRunning | Should Be $true
+    (@($snap.Services) | Where-Object { $_.Name -eq 'CDPSvc' }).WasRunning | Should Be $false
+  }
+
+  It 'fails closed when an identity service is in a transitional state' {
+    Mock Get-Service {
+      [pscustomobject]@{ Name = 'wlidsvc'; Status = 'StartPending'; StartType = 'Manual' }
+    }
+    $snap = Get-GdidServiceSnapshot
+    $snap.Success | Should Be $false
+    $snap.Error | Should Match 'transitional'
+  }
+}
+
+Describe 'degdid blocking-service classification' {
+  function New-TestServiceError {
+    param(
+      [string]$FullyQualifiedErrorId,
+      [string]$Message = 'error'
+    )
+    return New-Object System.Management.Automation.ErrorRecord(
+      [System.Exception]::new($Message),
+      $FullyQualifiedErrorId,
+      [System.Management.Automation.ErrorCategory]::NotSpecified,
+      $null
+    )
+  }
+
+  It 'treats an absent-service error as non-blocking' {
+    $rec = New-TestServiceError `
+      -FullyQualifiedErrorId 'NoServiceFoundForGivenName,Microsoft.PowerShell.Commands.GetServiceCommand'
+    @(Select-BlockingServiceError -ServiceErrors @($rec)).Count | Should Be 0
+  }
+
+  It 'treats any other query error as blocking' {
+    $rec = New-TestServiceError `
+      -FullyQualifiedErrorId 'PermissionDenied,Microsoft.PowerShell.Commands.GetServiceCommand' `
+      -Message 'Access is denied.'
+    @(Select-BlockingServiceError -ServiceErrors @($rec)).Count | Should Be 1
+  }
+
+  It 'keeps only the blocking error from a mixed set' {
+    $absent = New-TestServiceError -FullyQualifiedErrorId 'NoServiceFoundForGivenName,X'
+    $denied = New-TestServiceError -FullyQualifiedErrorId 'PermissionDenied,X' -Message 'Access is denied.'
+    $blocking = @(Select-BlockingServiceError -ServiceErrors @($absent, $denied))
+    $blocking.Count | Should Be 1
+    $blocking[0].Exception.Message | Should Be 'Access is denied.'
+  }
+
+  It 'returns nothing when there are no errors' {
+    @(Select-BlockingServiceError -ServiceErrors @()).Count | Should Be 0
+  }
+}

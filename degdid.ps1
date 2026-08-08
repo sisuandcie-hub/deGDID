@@ -2345,7 +2345,7 @@ function Invoke-TargetDeviceCredentialOperation {
   if ($accessMode -eq 'InteractiveTask') {
     return @(
       Invoke-CredentialTask `
-        -UserId $Target.Sid `
+        -UserId $Target.AccountName `
         -LogonType Interactive `
         -RunLevel Limited `
         -ResultDirectory (Join-Path $Target.ProfilePath 'AppData\Local\Temp') `

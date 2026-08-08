@@ -2294,12 +2294,16 @@ if (`$delete) {
     -UserId $UserId `
     -LogonType $LogonType `
     -RunLevel $RunLevel
+  $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries
 
   try {
     Register-ScheduledTask `
       -TaskName $taskName `
       -Action $action `
       -Principal $principal `
+      -Settings $settings `
       -Force `
       -ErrorAction Stop | Out-Null
     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop

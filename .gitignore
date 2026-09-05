@@ -1,9 +1,9 @@
-# Secrets / machine-local junk — never commit
+# Secrets / machine-local junk — never commit yu ··−−·· 
 
 # Credentials & env
 .env
 .env.*
-*.pem
+*.pem 
 *.pfx
 *.key
 credentials.json
@@ -39,4 +39,4 @@ Desktop.ini
 **/secrets/
 tools/.last-decoy*
 tools/.lab-*
-**/*-unredacted*
+**/*-unredacted* 
